@@ -32,7 +32,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/reference"
+	"github.com/containerd/containerd/v2/pkg/reference"
 	"github.com/containerd/log"
 	"github.com/containerd/stargz-snapshotter/cache"
 	"github.com/containerd/stargz-snapshotter/estargz"
@@ -49,7 +49,6 @@ import (
 	fusefs "github.com/hanwen/go-fuse/v2/fs"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -108,6 +107,7 @@ type Info struct {
 	FetchedSize  int64     // layer fetched size in bytes
 	PrefetchSize int64     // layer prefetch size in bytes
 	ReadTime     time.Time // last time the layer was read
+	TOCDigest    digest.Digest
 }
 
 // Resolver resolves the layer location and provieds the handler of that layer.
@@ -144,10 +144,10 @@ func NewResolver(root string, backgroundTaskManager *task.BackgroundTaskManager,
 	layerCache := cacheutil.NewTTLCache(resolveResultEntryTTL)
 	layerCache.OnEvicted = func(key string, value interface{}) {
 		if err := value.(*layer).close(); err != nil {
-			logrus.WithField("key", key).WithError(err).Warnf("failed to clean up layer")
+			log.L.WithField("key", key).WithError(err).Warnf("failed to clean up layer")
 			return
 		}
-		logrus.WithField("key", key).Debugf("cleaned up layer")
+		log.L.WithField("key", key).Debugf("cleaned up layer")
 	}
 
 	// blobCache caches resolved blobs for futural use. This is especially useful when a layer
@@ -155,10 +155,10 @@ func NewResolver(root string, backgroundTaskManager *task.BackgroundTaskManager,
 	blobCache := cacheutil.NewTTLCache(resolveResultEntryTTL)
 	blobCache.OnEvicted = func(key string, value interface{}) {
 		if err := value.(remote.Blob).Close(); err != nil {
-			logrus.WithField("key", key).WithError(err).Warnf("failed to clean up blob")
+			log.L.WithField("key", key).WithError(err).Warnf("failed to clean up blob")
 			return
 		}
-		logrus.WithField("key", key).Debugf("cleaned up blob")
+		log.L.WithField("key", key).Debugf("cleaned up blob")
 	}
 
 	if err := os.MkdirAll(root, 0700); err != nil {
@@ -315,7 +315,7 @@ func (r *Resolver) Resolve(ctx context.Context, hosts source.RegistryHosts, refs
 	}
 
 	// Combine layer information together and cache it.
-	l := newLayer(r, desc, blobR, vr)
+	l := newLayer(r, desc, blobR, vr, r.config.FuseConfig.PassThrough)
 	r.layerCacheMu.Lock()
 	cachedL, done2, added := r.layerCache.Add(name, l)
 	r.layerCacheMu.Unlock()
@@ -375,6 +375,7 @@ func newLayer(
 	desc ocispec.Descriptor,
 	blob *blobRef,
 	vr *reader.VerifiableReader,
+	pth bool,
 ) *layer {
 	return &layer{
 		resolver:         resolver,
@@ -382,6 +383,7 @@ func newLayer(
 		blob:             blob,
 		verifiableReader: vr,
 		prefetchWaiter:   newWaiter(),
+		passThrough:      pth,
 	}
 }
 
@@ -402,6 +404,7 @@ type layer struct {
 
 	prefetchOnce        sync.Once
 	backgroundFetchOnce sync.Once
+	passThrough         bool
 }
 
 func (l *layer) Info() Info {
@@ -415,6 +418,7 @@ func (l *layer) Info() Info {
 		FetchedSize:  l.blob.FetchedSize(),
 		PrefetchSize: l.prefetchedSize(),
 		ReadTime:     readTime,
+		TOCDigest:    l.verifiableReader.Metadata().TOCDigest(),
 	}
 }
 
@@ -582,7 +586,7 @@ func (l *layer) RootNode(baseInode uint32) (fusefs.InodeEmbedder, error) {
 	if l.r == nil {
 		return nil, fmt.Errorf("layer hasn't been verified yet")
 	}
-	return newNode(l.desc.Digest, l.r, l.blob, baseInode, l.resolver.overlayOpaqueType)
+	return newNode(l.desc.Digest, l.r, l.blob, baseInode, l.resolver.overlayOpaqueType, l.passThrough)
 }
 
 func (l *layer) ReadAt(p []byte, offset int64, opts ...remote.Option) (int, error) {

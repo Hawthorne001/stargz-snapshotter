@@ -30,16 +30,16 @@ import (
 	"time"
 
 	"github.com/containerd/console"
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/cmd/ctr/commands"
-	"github.com/containerd/containerd/cmd/ctr/commands/tasks"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/snapshots"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/cmd/ctr/commands"
+	"github.com/containerd/containerd/v2/cmd/ctr/commands/tasks"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	"github.com/containerd/stargz-snapshotter/analyzer/fanotify"
 	"github.com/containerd/stargz-snapshotter/analyzer/recorder"
 	"github.com/opencontainers/go-digest"
@@ -225,6 +225,9 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 			successCount++
 		}
 	}()
+	if err := task.Start(ctx); err != nil {
+		return "", err
+	}
 	if aOpts.terminal {
 		if err := tasks.HandleConsoleResize(ctx, task, con); err != nil {
 			log.G(ctx).WithError(err).Error("failed to resize console")
@@ -232,9 +235,6 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 	} else {
 		sigc := commands.ForwardAllSignals(ctx, task)
 		defer commands.StopCatch(sigc)
-	}
-	if err := task.Start(ctx); err != nil {
-		return "", err
 	}
 
 	// Wait until the task exit

@@ -25,6 +25,7 @@ source "${REPO}/script/util/utils.sh"
 
 CNI_PLUGINS_VERSION=$(get_version_from_arg "${REPO}/Dockerfile" "CNI_PLUGINS_VERSION")
 CRI_TOOLS_VERSION=$(get_version_from_arg "${REPO}/Dockerfile" "CRI_TOOLS_VERSION")
+PAUSE_IMAGE_NAME=$(get_version_from_arg "${REPO}/Dockerfile" "PAUSE_IMAGE_NAME_TEST")
 GINKGO_VERSION=v1.16.5
 
 if [ "${CRI_NO_RECREATE:-}" != "true" ] ; then
@@ -58,6 +59,8 @@ version = 2
 [debug]
   format = "json"
   level = "debug"
+[plugins."io.containerd.grpc.v1.cri"]
+  sandbox_image = "${PAUSE_IMAGE_NAME}"
 [plugins."io.containerd.grpc.v1.cri".containerd]
   default_runtime_name = "runc"
   snapshotter = "stargz"
@@ -128,7 +131,7 @@ ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPATH=/go
 # Do not install git and its dependencies here which will cause failure of building the image
 RUN apt-get update && apt-get install -y --no-install-recommends make && \
-    curl -Ls https://dl.google.com/go/go1.21.4.linux-\${TARGETARCH:-amd64}.tar.gz | tar -C /usr/local -xz && \
+    curl -Ls https://dl.google.com/go/go1.23.0.linux-\${TARGETARCH:-amd64}.tar.gz | tar -C /usr/local -xz && \
     go install github.com/onsi/ginkgo/ginkgo@${GINKGO_VERSION} && \
     mkdir -p \${GOPATH}/src/github.com/kubernetes-sigs/cri-tools /tmp/cri-tools && \
     curl -sL https://github.com/kubernetes-sigs/cri-tools/archive/refs/tags/v${CRI_TOOLS_VERSION}.tar.gz | tar -C /tmp/cri-tools -xz && \

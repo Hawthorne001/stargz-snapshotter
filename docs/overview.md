@@ -95,6 +95,41 @@ root@1d43741b8d29:/go# cat /.stargz-snapshotter/*
 {"digest":"sha256:f077511be7d385c17ba88980379c5cd0aab7068844dffa7a1cefbf68cc3daea3","size":580,"fetchedSize":580,"fetchedPercent":100}
 ```
 
+## Fuse Manager
+
+The fuse manager is designed to maintain the availability of running containers by managing the lifecycle of FUSE mountpoints independently from the stargz snapshotter.
+
+### Fuse Manager Overview
+Remote snapshots are mounted using FUSE, and its filesystem processes are attached to the stargz snapshotter. If the stargz snapshotter restarts (due to configuration changes or crashes), all filesystem processes will be killed and restarted, which causes the remount of FUSE mountpoints, making running containers unavailable.
+
+To avoid this, we use a fuse daemon called the fuse manager to handle filesystem processes. The fuse manager is responsible for mounting and unmounting remote snapshotters. Its process is detached from the stargz snapshotter main process to an independent one in a shim-like way during the snapshotter's startup. This design ensures that the restart of the snapshotter won't affect the filesystem processes it manages, keeping mountpoints and running containers available during the restart. However, it is important to note that the restart of the fuse manager itself triggers a remount, so it is recommended to keep the fuse manager running in a good state.
+
+You can enable the fuse manager by adding the flag `--detach-fuse-manager=true` to the stargz snapshotter.
+
+### Upgrading Fuse Manager
+
+When upgrading the fuse manager, it's recommended to follow these steps:
+
+1. Stop the containers using the stargz snapshotter.
+2. Stop the fuse manager and containerd-stargz-grpc process.
+3. Upgrade the your binary.
+4. Restart the containerd-stargz-grpc process.
+5. Restart the containers.
+
+This ensures a clean upgrade without impacting running containers.
+
+### Important Considerations
+
+Before restarting the `containerd-stargz-grpc` process, it is essential to consider the state of any running containers.
+
+1. **When to Use SIGKILL** :
+
+If there are running containers, it is crucial to terminate the `containerd-stargz-grpc` process using `SIGKILL`. This approach prevents the normal shutdown sequence from attempting to clean up the mount points of the running containers, which could disrupt their availability. By using `SIGKILL`, you ensure that the process is forcefully terminated without affecting the ongoing operations of the containers.
+
+2. **When to Use SIGTERM** :
+
+If there are no running containers, you should use `SIGTERM` to terminate the `containerd-stargz-grpc` process. This allows the process to follow its normal shutdown sequence, ensuring that it properly cleans up resources and mount points.
+
 ## Registry-related configuration
 
 You can configure stargz snapshotter for accessing registries with custom configurations.
