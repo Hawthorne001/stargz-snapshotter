@@ -44,8 +44,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/reference"
-	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/containerd/v2/pkg/reference"
 	"github.com/containerd/log"
 	"github.com/containerd/stargz-snapshotter/estargz"
 	"github.com/containerd/stargz-snapshotter/fs/config"
@@ -63,7 +63,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -73,6 +72,12 @@ const (
 )
 
 var fusermountBin = []string{"fusermount", "fusermount3"}
+var (
+	nsLock = sync.Mutex{}
+
+	ns         *metrics.Namespace
+	metricsCtr *layermetrics.Controller
+)
 
 type Option func(*options)
 
@@ -80,7 +85,7 @@ type options struct {
 	getSources              source.GetSources
 	resolveHandlers         map[string]remote.Handler
 	metadataStore           metadata.Store
-	metricsLogLevel         *logrus.Level
+	metricsLogLevel         *log.Level
 	overlayOpaqueType       layer.OverlayOpaqueType
 	additionalDecompressors func(context.Context, source.RegistryHosts, reference.Spec, ocispec.Descriptor) []metadata.Decompressor
 }
@@ -106,7 +111,7 @@ func WithMetadataStore(metadataStore metadata.Store) Option {
 	}
 }
 
-func WithMetricsLogLevel(logLevel logrus.Level) Option {
+func WithMetricsLogLevel(logLevel log.Level) Option {
 	return func(opts *options) {
 		opts.metricsLogLevel = &logLevel
 	}
@@ -161,18 +166,20 @@ func NewFilesystem(root string, cfg config.Config, opts ...Option) (_ snapshot.F
 		return nil, fmt.Errorf("failed to setup resolver: %w", err)
 	}
 
-	var ns *metrics.Namespace
-	if !cfg.NoPrometheus {
+	nsLock.Lock()
+	defer nsLock.Unlock()
+
+	if !cfg.NoPrometheus && ns == nil {
 		ns = metrics.NewNamespace("stargz", "fs", nil)
-		logLevel := logrus.DebugLevel
+		logLevel := log.DebugLevel
 		if fsOpts.metricsLogLevel != nil {
 			logLevel = *fsOpts.metricsLogLevel
 		}
 		commonmetrics.Register(logLevel) // Register common metrics. This will happen only once.
+		metrics.Register(ns)             // Register layer metrics.
 	}
-	c := layermetrics.NewLayerMetrics(ns)
-	if ns != nil {
-		metrics.Register(ns) // Register layer metrics.
+	if metricsCtr == nil {
+		metricsCtr = layermetrics.NewLayerMetrics(ns)
 	}
 
 	return &filesystem{
@@ -186,7 +193,7 @@ func NewFilesystem(root string, cfg config.Config, opts ...Option) (_ snapshot.F
 		backgroundTaskManager: tm,
 		allowNoVerification:   cfg.AllowNoVerification,
 		disableVerification:   cfg.DisableVerification,
-		metricsController:     c,
+		metricsController:     metricsCtr,
 		attrTimeout:           attrTimeout,
 		entryTimeout:          entryTimeout,
 	}, nil

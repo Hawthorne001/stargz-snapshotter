@@ -12,27 +12,30 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-ARG CONTAINERD_VERSION=v1.7.13
-ARG RUNC_VERSION=v1.1.7
-ARG CNI_PLUGINS_VERSION=v1.3.0
-ARG NERDCTL_VERSION=1.4.0
+ARG CONTAINERD_VERSION=v2.0.0
+ARG RUNC_VERSION=v1.2.1
+ARG CNI_PLUGINS_VERSION=v1.6.0
+# TODO: support v2
+ARG NERDCTL_VERSION=1.7.7
 
-ARG PODMAN_VERSION=v4.5.0
-ARG CRIO_VERSION=v1.27.0
-ARG CONMON_VERSION=v2.1.7
-ARG COMMON_VERSION=v0.53.0
+ARG PODMAN_VERSION=v5.2.5
+ARG CRIO_VERSION=v1.31.2
+ARG CONMON_VERSION=v2.1.12
+ARG COMMON_VERSION=v0.61.0
 ARG CRIO_TEST_PAUSE_IMAGE_NAME=registry.k8s.io/pause:3.6
+ARG NETAVARK_VERSION=v1.13.0
 
 ARG CONTAINERIZED_SYSTEMD_VERSION=v0.1.1
-ARG SLIRP4NETNS_VERSION=v1.2.0
+ARG SLIRP4NETNS_VERSION=v1.3.1
+ARG PAUSE_IMAGE_NAME_TEST=registry.k8s.io/pause:3.10
 
 # Used in CI
-ARG CRI_TOOLS_VERSION=v1.27.0
+ARG CRI_TOOLS_VERSION=v1.30.0
 
 # Legacy builder that doesn't support TARGETARCH should set this explicitly using --build-arg.
 # If TARGETARCH isn't supported by the builder, the default value is "amd64".
 
-FROM golang:1.21.5-bullseye AS golang-base
+FROM golang:1.24-bullseye AS golang-base
 
 # Build containerd
 FROM golang-base AS containerd-dev
@@ -63,21 +66,11 @@ RUN apt-get update -y && apt-get install -y libbtrfs-dev libseccomp-dev && \
       echo 'replace github.com/containerd/stargz-snapshotter => '$GOPATH'/src/github.com/containerd/stargz-snapshotter' >> integration/client/go.mod && \
       echo 'replace github.com/containerd/stargz-snapshotter/estargz => '$GOPATH'/src/github.com/containerd/stargz-snapshotter/estargz' >> integration/client/go.mod ; \
     fi && \
-    if [ "$(echo -n ${CONTAINERD_VERSION} | head -c 4)" = "v1.7" ] ; then \
-      # containerd v1.7 doesn't support cri-api >= v0.28 which adds RuntimeConfig API
-      echo 'replace k8s.io/cri-api => k8s.io/cri-api v0.27.1' >> go.mod ; \
-      if [ -f api/go.mod ] ; then \
-        echo 'replace k8s.io/cri-api => k8s.io/cri-api v0.27.1' >> api/go.mod ; \
-      fi ; \
-      if [ -f integration/client/go.mod ] ; then \
-        echo 'replace k8s.io/cri-api => k8s.io/cri-api v0.27.1' >> integration/client/go.mod ; \
-      fi ; \
-    fi && \
     echo 'package main \nimport _ "github.com/containerd/stargz-snapshotter/service/plugin"' > cmd/containerd/builtins_stargz_snapshotter.go && \
     make vendor && make && DESTDIR=/out/ PREFIX= make install
 
 # Build runc
-FROM golang-base AS runc-dev
+FROM golang:1.24-bullseye AS runc-dev
 ARG RUNC_VERSION
 RUN apt-get update -y && apt-get install -y libseccomp-dev && \
     git clone -b ${RUNC_VERSION} --depth 1 \
@@ -106,7 +99,7 @@ ARG CTR_REMOTE_BUILD_FLAGS
 COPY . $GOPATH/src/github.com/containerd/stargz-snapshotter
 ARG CGO_ENABLED
 RUN cd $GOPATH/src/github.com/containerd/stargz-snapshotter && \
-    PREFIX=/out/ GOARCH=${TARGETARCH:-amd64} GO_BUILD_FLAGS=${SNAPSHOTTER_BUILD_FLAGS} make stargz-store
+    PREFIX=/out/ GOARCH=${TARGETARCH:-amd64} GO_BUILD_FLAGS=${SNAPSHOTTER_BUILD_FLAGS} make stargz-store stargz-store-helper
 
 # Build podman
 FROM golang-base AS podman-dev
@@ -118,7 +111,8 @@ RUN apt-get update -y && apt-get install -y libseccomp-dev libgpgme-dev && \
     make && make install PREFIX=/out/
 
 # Build CRI-O
-FROM golang-base AS cri-o-dev
+# FROM golang-base AS cri-o-dev
+FROM golang:1.24-bullseye AS cri-o-dev
 ARG CRIO_VERSION
 RUN apt-get update -y && apt-get install -y libseccomp-dev libgpgme-dev && \
     git clone https://github.com/cri-o/cri-o $GOPATH/src/github.com/cri-o/cri-o && \
@@ -178,12 +172,13 @@ COPY --from=snapshotter-dev /out/ctr-remote /usr/local/bin/
 RUN ln -s /usr/local/bin/ctr-remote /usr/local/bin/ctr
 
 # Base image which contains podman with stargz-store
-FROM golang-base AS podman-base
+FROM ubuntu:24.04 AS podman-base
 ARG TARGETARCH
 ARG CNI_PLUGINS_VERSION
 ARG PODMAN_VERSION
-RUN apt-get update -y && apt-get --no-install-recommends install -y fuse3 libgpgme-dev \
-                         iptables libyajl-dev && \
+ARG NETAVARK_VERSION
+RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y fuse3 libgpgme-dev \
+                         iptables libyajl-dev curl ca-certificates libglib2.0 libseccomp-dev wget && \
     # Make CNI plugins manipulate iptables instead of nftables
     # as this test runs in a Docker container that network is configured with iptables.
     # c.f. https://github.com/moby/moby/issues/26824
@@ -191,6 +186,13 @@ RUN apt-get update -y && apt-get --no-install-recommends install -y fuse3 libgpg
     mkdir -p /etc/containers /etc/cni/net.d /opt/cni/bin && \
     curl -qsSL https://raw.githubusercontent.com/containers/podman/${PODMAN_VERSION}/cni/87-podman-bridge.conflist | tee /etc/cni/net.d/87-podman-bridge.conflist && \
     curl -Ls https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-${TARGETARCH:-amd64}-${CNI_PLUGINS_VERSION}.tgz | tar xzv -C /opt/cni/bin
+
+RUN mkdir /tmp/netavark ; \
+    wget -O /tmp/netavark/netavark.gz https://github.com/containers/netavark/releases/download/${NETAVARK_VERSION}/netavark.gz ; \
+    gunzip /tmp/netavark/netavark.gz ; \
+    mkdir -p /usr/local/libexec/podman ; \
+    mv /tmp/netavark/netavark /usr/local/libexec/podman/ ; \
+    chmod 0755 /usr/local/libexec/podman/netavark
 
 COPY --from=podman-dev /out/bin/* /usr/local/bin/
 COPY --from=runc-dev /out/sbin/* /usr/local/sbin/
@@ -215,6 +217,9 @@ RUN curl -o /usr/local/bin/slirp4netns --fail -L https://github.com/rootless-con
 COPY ./script/podman/config/storage.conf /home/rootless/.config/containers/storage.conf
 # Stargz Store systemd service for rootless Podman
 COPY ./script/podman/config/podman-rootless-stargz-store.service /home/rootless/.config/systemd/user/
+
+COPY ./script/podman/config/containers.conf /home/rootless/.config/containers/containers.conf
+
 # test-podman-rootless.sh logins to the user via SSH
 COPY ./script/podman/config/test-podman-rootless.sh /test-podman-rootless.sh
 RUN ssh-keygen -q -t rsa -f /root/.ssh/id_rsa -N '' && \
@@ -241,7 +246,7 @@ RUN apt-get update && apt-get install -y iptables && \
     curl -Ls https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/cni-plugins-linux-${TARGETARCH:-amd64}-${CNI_PLUGINS_VERSION}.tgz | tar xzv -C /opt/cni/bin
 
 # Image which can be used as a node image for KinD (containerd with builtin snapshotter)
-FROM kindest/node:v1.29.2 AS kind-builtin-snapshotter
+FROM kindest/node:v1.30.0 AS kind-builtin-snapshotter
 COPY --from=containerd-snapshotter-dev /out/bin/containerd /out/bin/containerd-shim-runc-v2 /usr/local/bin/
 COPY --from=snapshotter-dev /out/ctr-remote /usr/local/bin/
 COPY ./script/config/ /
@@ -282,7 +287,7 @@ COPY ./script/config-cri-o/ /
 ENTRYPOINT [ "/usr/local/bin/entrypoint" ]
 
 # Image which can be used as a node image for KinD
-FROM kindest/node:v1.29.2
+FROM kindest/node:v1.30.0
 COPY --from=containerd-dev /out/bin/containerd /out/bin/containerd-shim-runc-v2 /usr/local/bin/
 COPY --from=snapshotter-dev /out/* /usr/local/bin/
 COPY ./script/config/ /

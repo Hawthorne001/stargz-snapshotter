@@ -17,12 +17,11 @@ on:
 
 env:
   DOCKER_BUILDKIT: 1
-  # Temporary disable contaienrd main branch test and migrate to containerd v2 after it's released.
-  # DOCKER_BUILD_ARGS: --build-arg=CONTAINERD_VERSION=main # do tests with the latest containerd
+  DOCKER_BUILD_ARGS: --build-arg=CONTAINERD_VERSION=main # do tests with the latest containerd
 
 jobs:
   integration:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: Integration
     steps:
     - name: Install htpasswd for setting up private registry
@@ -32,7 +31,7 @@ jobs:
       run: make integration
 
   test-optimize:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: Optimize
     steps:
     - name: Install htpasswd for setting up private registry
@@ -42,7 +41,7 @@ jobs:
       run: make test-optimize
 
   test-kind:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: Kind
     steps:
     - name: Install htpasswd for setting up private registry
@@ -52,7 +51,7 @@ jobs:
       run: make test-kind
 
   test-criauth:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: CRIAuth
     steps:
     - name: Install htpasswd for setting up private registry
@@ -62,7 +61,7 @@ jobs:
       run: make test-criauth
 
   test-cri-containerd:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: CRIValidationContainerd
     steps:
     - uses: actions/checkout@v4
@@ -70,7 +69,7 @@ jobs:
       run: make test-cri-containerd
 
   test-cri-o:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: CRIValidationCRIO
     steps:
     - name: Install the latest docker
@@ -82,18 +81,21 @@ jobs:
     - name: Varidate the runtime through CRI with CRI-O
       env:
         DOCKER_BUILD_ARGS: "--build-arg=RUNC_VERSION=v1.0.3"
-      run: make test-cri-o
+      run: |
+        # needed to pass "runtime should output OOMKilled reason" test
+        sudo swapoff -a
+        make test-cri-o
 
   test-k3s:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: K3S
     steps:
     - uses: actions/setup-go@v5
       with:
-        go-version: '1.21.x'
+        go-version: '1.23.x'
     - name: Install k3d
       run: |
-        wget -q -O - https://raw.githubusercontent.com/rancher/k3d/v5.6.0/install.sh | bash
+        wget -q -O - https://raw.githubusercontent.com/rancher/k3d/v5.6.3/install.sh | bash
     - name: Install htpasswd for setting up private registry
       run: sudo apt-get update -y && sudo apt-get --no-install-recommends install -y apache2-utils
     - name: Install yq

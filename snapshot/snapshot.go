@@ -24,15 +24,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/mount"
-	"github.com/containerd/containerd/snapshots"
-	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
-	"github.com/containerd/containerd/snapshots/storage"
+	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/core/snapshots/storage"
+	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
 	"github.com/containerd/continuity/fs"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/moby/sys/mountinfo"
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -74,6 +73,7 @@ type SnapshotterConfig struct {
 	asyncRemove                 bool
 	noRestore                   bool
 	allowInvalidMountsOnRestart bool
+	detach                      bool
 }
 
 // Opt is an option to configure the remote snapshotter
@@ -98,6 +98,11 @@ func AllowInvalidMountsOnRestart(config *SnapshotterConfig) error {
 	return nil
 }
 
+func SetDetachFlag(config *SnapshotterConfig) error {
+	config.detach = true
+	return nil
+}
+
 type snapshotter struct {
 	root        string
 	ms          *storage.MetaStore
@@ -108,6 +113,7 @@ type snapshotter struct {
 	userxattr                   bool // whether to enable "userxattr" mount option
 	noRestore                   bool
 	allowInvalidMountsOnRestart bool
+	detach                      bool
 }
 
 // NewSnapshotter returns a Snapshotter which can use unpacked remote layers
@@ -147,7 +153,7 @@ func NewSnapshotter(ctx context.Context, root string, targetFs FileSystem, opts 
 
 	userxattr, err := overlayutils.NeedsUserXAttr(root)
 	if err != nil {
-		logrus.WithError(err).Warnf("cannot detect whether \"userxattr\" option needs to be used, assuming to be %v", userxattr)
+		log.G(ctx).WithError(err).Warnf("cannot detect whether \"userxattr\" option needs to be used, assuming to be %v", userxattr)
 	}
 
 	o := &snapshotter{
@@ -158,6 +164,7 @@ func NewSnapshotter(ctx context.Context, root string, targetFs FileSystem, opts 
 		userxattr:                   userxattr,
 		noRestore:                   config.noRestore,
 		allowInvalidMountsOnRestart: config.allowInvalidMountsOnRestart,
+		detach:                      config.detach,
 	}
 
 	if err := o.restoreRemoteSnapshot(ctx); err != nil {
@@ -426,6 +433,15 @@ func (o *snapshotter) cleanup(ctx context.Context, cleanupCommitted bool) error 
 	return nil
 }
 
+func (o *snapshotter) cleanupMetadataDB() error {
+	metadataDBPath := filepath.Join(o.root, "metadata.db")
+	err := os.Remove(metadataDBPath)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (o *snapshotter) cleanupDirectories(ctx context.Context, cleanupCommitted bool) ([]string, error) {
 	// Get a write transaction to ensure no other write transaction can be entered
 	// while the cleanup is scanning.
@@ -659,6 +675,11 @@ func (o *snapshotter) Close() error {
 	if err := o.cleanup(ctx, cleanupCommitted); err != nil {
 		log.G(ctx).WithError(err).Warn("failed to cleanup")
 	}
+
+	if err := o.cleanupMetadataDB(); err != nil {
+		log.G(ctx).WithError(err).Warn("failed to cleanup metadata.db")
+	}
+
 	return o.ms.Close()
 }
 
@@ -684,8 +705,7 @@ func (o *snapshotter) prepareRemoteSnapshot(ctx context.Context, key string, lab
 // checkAvailability checks avaiability of the specified layer and all lower
 // layers using filesystem's checking functionality.
 func (o *snapshotter) checkAvailability(ctx context.Context, key string) bool {
-	ctx = log.WithLogger(ctx, log.G(ctx).WithField("key", key))
-	log.G(ctx).Debug("checking layer availability")
+	log.G(ctx).WithField("key", key).Debug("checking layer availability")
 
 	ctx, t, err := o.ms.TransactionContext(ctx, false)
 	if err != nil {
@@ -724,6 +744,10 @@ func (o *snapshotter) checkAvailability(ctx context.Context, key string) bool {
 }
 
 func (o *snapshotter) restoreRemoteSnapshot(ctx context.Context) error {
+	if o.detach {
+		return nil
+	}
+
 	mounts, err := mountinfo.GetMounts(nil)
 	if err != nil {
 		return err
@@ -752,7 +776,7 @@ func (o *snapshotter) restoreRemoteSnapshot(ctx context.Context) error {
 	for _, info := range task {
 		if err := o.prepareRemoteSnapshot(ctx, info.Name, info.Labels); err != nil {
 			if o.allowInvalidMountsOnRestart {
-				logrus.WithError(err).Warnf("failed to restore remote snapshot %s; remove this snapshot manually", info.Name)
+				log.G(ctx).WithError(err).Warnf("failed to restore remote snapshot %s; remove this snapshot manually", info.Name)
 				// This snapshot mount is invalid but allow this.
 				// NOTE: snapshotter.Mount() will fail to return the mountpoint of these invalid snapshots so
 				//       containerd cannot use them anymore. User needs to manually remove the snapshots from

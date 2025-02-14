@@ -10,7 +10,7 @@ env:
 
 jobs:
   kind-image:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: Kind image
     steps:
       - name: Checkout
@@ -33,7 +33,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v5.3.0
+        uses: docker/build-push-action@v6.13.0
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}

@@ -21,106 +21,106 @@ import (
 	gocontext "context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/contrib/nvidia"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/oci"
-	"github.com/containerd/containerd/pkg/netns"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/contrib/nvidia"
+	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/pkg/netns"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	gocni "github.com/containerd/go-cni"
-	"github.com/hashicorp/go-multierror"
+	"github.com/containerd/log"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
-	"github.com/sirupsen/logrus"
-	"github.com/urfave/cli"
+	"github.com/urfave/cli/v2"
 )
 
 const netnsMountDir = "/var/run/netns"
 
 var samplerFlags = []cli.Flag{
-	cli.BoolFlag{
+	&cli.BoolFlag{
 		Name:  "terminal,t",
 		Usage: "enable terminal for sample container. must be specified with i option",
 	},
-	cli.BoolFlag{
+	&cli.BoolFlag{
 		Name:  "i",
 		Usage: "attach stdin to the container",
 	},
-	cli.IntFlag{
+	&cli.IntFlag{
 		Name:  "period",
 		Usage: "time period to monitor access log",
 		Value: defaultPeriod,
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "user",
 		Usage: "user/group name to override image's default config(user[:group])",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "cwd",
 		Usage: "working dir to override image's default config",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "args",
 		Usage: "command arguments to override image's default config(in JSON array)",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "entrypoint",
 		Usage: "entrypoint to override image's default config(in JSON array)",
 	},
-	cli.StringSliceFlag{
+	&cli.StringSliceFlag{
 		Name:  "env",
 		Usage: "environment valulable to add or override to the image's default config",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "env-file",
 		Usage: "specify additional container environment variables in a file(i.e. FOO=bar, one per line)",
 	},
-	cli.StringSliceFlag{
+	&cli.StringSliceFlag{
 		Name:  "mount",
 		Usage: "additional mounts for the container (e.g. type=foo,source=/path,destination=/target,options=bind)",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "dns-nameservers",
 		Usage: "comma-separated nameservers added to the container's /etc/resolv.conf",
 		Value: "8.8.8.8",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "dns-search-domains",
 		Usage: "comma-separated search domains added to the container's /etc/resolv.conf",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "dns-options",
 		Usage: "comma-separated options added to the container's /etc/resolv.conf",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "add-hosts",
 		Usage: "comma-separated hosts configuration (host:IP) added to container's /etc/hosts",
 	},
-	cli.BoolFlag{
+	&cli.BoolFlag{
 		Name:  "cni",
 		Usage: "enable CNI-based networking",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "cni-plugin-conf-dir",
 		Usage: "path to the CNI plugins configuration directory",
 	},
-	cli.StringFlag{
+	&cli.StringFlag{
 		Name:  "cni-plugin-dir",
 		Usage: "path to the CNI plugins binary directory",
 	},
-	cli.IntSliceFlag{
+	&cli.IntSliceFlag{
 		Name:  "gpus",
 		Usage: "add gpus to the container",
 	},
-	cli.BoolFlag{
+	&cli.BoolFlag{
 		Name:  "net-host",
 		Usage: "enable host networking in the container",
 	},
@@ -129,13 +129,14 @@ var samplerFlags = []cli.Flag{
 func getSpecOpts(clicontext *cli.Context) func(image containerd.Image, rootfs string) (opts []oci.SpecOpts, done func() error, rErr error) {
 	return func(image containerd.Image, rootfs string) (opts []oci.SpecOpts, done func() error, rErr error) {
 		var cleanups []func() error
-		done = func() (allErr error) {
+		done = func() error {
+			var errs []error
 			for i := len(cleanups) - 1; i >= 0; i-- {
 				if err := cleanups[i](); err != nil {
-					allErr = multierror.Append(allErr, err)
+					errs = append(errs, err)
 				}
 			}
-			return
+			return errors.Join(errs...)
 		}
 		defer func() {
 			if rErr != nil {
@@ -203,14 +204,14 @@ func getSpecOpts(clicontext *cli.Context) func(image containerd.Image, rootfs st
 		}
 		if clicontext.Bool("net-host") {
 			if runtime.GOOS == "windows" {
-				logrus.Warn("option --net-host is not supported on Windows")
+				log.L.Warn("option --net-host is not supported on Windows")
 			} else {
 				opts = append(opts, oci.WithHostNamespace(runtimespec.NetworkNamespace), oci.WithHostHostsFile, oci.WithHostResolvconf)
 			}
 		}
 		if clicontext.IsSet("gpus") {
 			if runtime.GOOS == "windows" {
-				logrus.Warn("option --gpus is not supported on Windows")
+				log.L.Warn("option --gpus is not supported on Windows")
 			} else {
 				opts = append(opts, nvidia.WithGPUs(nvidia.WithDevices(clicontext.IntSlice("gpus")...), nvidia.WithAllCapabilities))
 			}
@@ -265,13 +266,14 @@ func withEntrypointArgs(clicontext *cli.Context, image containerd.Image) (oci.Sp
 
 func withCNI(clicontext *cli.Context) (specOpt oci.SpecOpts, done func() error, rErr error) {
 	var cleanups []func() error
-	done = func() (allErr error) {
+	done = func() error {
+		var errs []error
 		for i := len(cleanups) - 1; i >= 0; i-- {
 			if err := cleanups[i](); err != nil {
-				allErr = multierror.Append(allErr, err)
+				errs = append(errs, err)
 			}
 		}
-		return
+		return errors.Join(errs...)
 	}
 	defer func() {
 		if rErr != nil {

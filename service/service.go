@@ -18,11 +18,13 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 
-	"github.com/containerd/containerd/reference"
-	"github.com/containerd/containerd/snapshots"
-	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/reference"
+	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
 	"github.com/containerd/log"
 	stargzfs "github.com/containerd/stargz-snapshotter/fs"
 	"github.com/containerd/stargz-snapshotter/fs/layer"
@@ -30,8 +32,8 @@ import (
 	"github.com/containerd/stargz-snapshotter/metadata"
 	esgzexternaltoc "github.com/containerd/stargz-snapshotter/nativeconverter/estargz/externaltoc"
 	"github.com/containerd/stargz-snapshotter/service/resolver"
+	"github.com/containerd/stargz-snapshotter/snapshot"
 	snbase "github.com/containerd/stargz-snapshotter/snapshot"
-	"github.com/hashicorp/go-multierror"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -66,6 +68,27 @@ func WithFilesystemOptions(opts ...stargzfs.Option) Option {
 
 // NewStargzSnapshotterService returns stargz snapshotter.
 func NewStargzSnapshotterService(ctx context.Context, root string, config *Config, opts ...Option) (snapshots.Snapshotter, error) {
+	fs, err := NewFileSystem(ctx, root, config, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure filesystem: %w", err)
+	}
+
+	var snapshotter snapshots.Snapshotter
+
+	snOpts := []snbase.Opt{snbase.AsynchronousRemove}
+	if config.SnapshotterConfig.AllowInvalidMountsOnRestart {
+		snOpts = append(snOpts, snbase.AllowInvalidMountsOnRestart)
+	}
+
+	snapshotter, err = snbase.NewSnapshotter(ctx, snapshotterRoot(root), fs, snOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new snapshotter: %w", err)
+	}
+
+	return snapshotter, nil
+}
+
+func NewFileSystem(ctx context.Context, root string, config *Config, opts ...Option) (snapshot.FileSystem, error) {
 	var sOpts options
 	for _, o := range opts {
 		o(&sOpts)
@@ -97,22 +120,10 @@ func NewStargzSnapshotterService(ctx context.Context, root string, config *Confi
 	)
 	fs, err := stargzfs.NewFilesystem(fsRoot(root), config.Config, fsOpts...)
 	if err != nil {
-		log.G(ctx).WithError(err).Fatalf("failed to configure filesystem")
+		return nil, err
 	}
 
-	var snapshotter snapshots.Snapshotter
-
-	snOpts := []snbase.Opt{snbase.AsynchronousRemove}
-	if config.SnapshotterConfig.AllowInvalidMountsOnRestart {
-		snOpts = append(snOpts, snbase.AllowInvalidMountsOnRestart)
-	}
-
-	snapshotter, err = snbase.NewSnapshotter(ctx, snapshotterRoot(root), fs, snOpts...)
-	if err != nil {
-		log.G(ctx).WithError(err).Fatalf("failed to create new snapshotter")
-	}
-
-	return snapshotter, err
+	return fs, nil
 }
 
 func snapshotterRoot(root string) string {
@@ -125,14 +136,15 @@ func fsRoot(root string) string {
 
 func sources(ps ...source.GetSources) source.GetSources {
 	return func(labels map[string]string) (source []source.Source, allErr error) {
+		var errs []error
 		for _, p := range ps {
 			src, err := p(labels)
 			if err == nil {
 				return src, nil
 			}
-			allErr = multierror.Append(allErr, err)
+			errs = append(errs, err)
 		}
-		return
+		return nil, errors.Join(errs...)
 	}
 }
 
